@@ -2,6 +2,7 @@ import ollama
 import json
 import re
 import requests
+from bs4 import BeautifulSoup
 from profile_manager import ProfileManager
 from web_search import WebSearcher
 
@@ -87,7 +88,20 @@ If no search is needed, output exactly "NO_SEARCH"."""
             else:
                 search_results_text = "A web search was attempted but returned NO results. Do NOT suggest any URLs or links whatsoever in your response."
 
-        # 3. Generate final response
+        # 3. Fetch content from any URLs the user shared in their message
+        user_urls = re.findall(r'https?://[^\s)\]>"\']+', user_message)
+        fetched_content_text = ""
+        if user_urls:
+            fetched_pages = []
+            for url in user_urls[:3]:  # Limit to 3 URLs max
+                clean_url = url.rstrip('.,;:!?')
+                content = self._fetch_url_content(clean_url)
+                if content:
+                    fetched_pages.append(f"--- Content from {clean_url} ---\n{content}\n--- End of content ---")
+            if fetched_pages:
+                fetched_content_text = "\n\nThe user shared the following URLs. Here is the actual content fetched from those pages:\n" + "\n\n".join(fetched_pages)
+
+        # 4. Generate final response
         system_prompt = f"""You are a friendly assistant that learns about the user's interests, updates their profile, and proposes discussion topics and interesting articles. 
 The user profile is saved independently. Focus on responding to the user naturally. 
 IMPORTANT: You MUST interact in the user's language. Detect the language of their message and respond in that same language.
@@ -98,6 +112,7 @@ User Profile:
 {updated_profile_str}
 
 {search_results_text}
+{fetched_content_text}
 
 If you have web search results, incorporate them gracefully into your response and share the links.
 Occasionnally suggest content that is out of the user's interest domains, to avoid the risk of echo chamber!
@@ -105,6 +120,7 @@ CRITICAL RULE: NEVER hallucinate URLs or links. You must ONLY share links that a
 - Avant de suggérer un lien URL, vérifie qu'il est valide et accessible.
 - Ne suggère aucun lien URL sauf si tu es certain qu'il fonctionne.
 - Si tu ne peux pas trouver de lien URL pertinent et valide, ne suggère rien.
+If the user shared a URL and you have fetched content from it above, use that content to answer their questions accurately. Do NOT pretend to have read content you haven't actually seen.
 """
 
         messages = [{"role": "system", "content": system_prompt}]
@@ -125,6 +141,44 @@ CRITICAL RULE: NEVER hallucinate URLs or links. You must ONLY share links that a
             "new_profile": updated_profile,
             "search_query": search_query if performed_search else None
         }
+    def _fetch_url_content(self, url):
+        """Fetch a web page and extract its readable text content."""
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            res = requests.get(url, headers=headers, timeout=10, allow_redirects=True)
+            if res.status_code >= 400:
+                print(f"Failed to fetch URL {url}: HTTP {res.status_code}")
+                return None
+            
+            soup = BeautifulSoup(res.text, 'html.parser')
+            
+            # Remove script, style, and navigation elements
+            for tag in soup(['script', 'style', 'nav', 'footer', 'header', 'aside', 'form']):
+                tag.decompose()
+            
+            # Extract text
+            text = soup.get_text(separator='\n', strip=True)
+            
+            # Clean up excessive whitespace
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            text = '\n'.join(lines)
+            
+            # Truncate to avoid overwhelming the LLM context
+            max_chars = 5000
+            if len(text) > max_chars:
+                text = text[:max_chars] + "\n... [content truncated]"
+            
+            if len(text) < 50:
+                print(f"URL {url} returned very little text content")
+                return None
+                
+            print(f"Successfully fetched content from {url} ({len(text)} chars)")
+            return text
+        except Exception as e:
+            print(f"Error fetching URL content from {url}: {e}")
+            return None
 
     def _validate_urls_in_response(self, text):
         """Extract all URLs from the response, validate them, and remove broken ones.
