@@ -1,0 +1,6 @@
+streamlit==1.42.2
+ollama==0.4.7
+duckduckgo-search==7.3.2
+requests==2.32.3
+beautifulsoup4==4.13.3
+googlesearch-python
